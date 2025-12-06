@@ -1,0 +1,929 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <title>Circle & Line Graphing Engine</title>
+  <style>
+    html, body {
+      margin: 0;
+      padding: 0;
+      height: 100%;
+      font-family: system-ui, sans-serif;
+      overflow: hidden;
+    }
+    #container {
+      display: flex;
+      height: 100vh;
+      width: 100vw;
+    }
+    #sidebar {
+      width: 260px;
+      background: #f5f5f5;
+      border-right: 1px solid #ccc;
+      padding: 12px;
+      overflow-y: auto;
+      box-sizing: border-box;
+      font-size: 13px;
+    }
+    #graphCanvas {
+      flex: 1;
+      display: block;
+      background: #ffffff;
+    }
+    .section {
+      background: #ffffff;
+      padding: 8px;
+      border-radius: 6px;
+      border: 1px solid #ccc;
+      margin-bottom: 10px;
+    }
+    .tool-buttons button {
+      margin-right: 6px;
+      padding: 4px 8px;
+      font-size: 12px;
+      cursor: pointer;
+      border-radius: 4px;
+      border: 1px solid #bbb;
+      background: #eee;
+    }
+    .tool-buttons button.active {
+      background: #007bff;
+      color: #fff;
+      border-color: #007bff;
+    }
+    .row {
+      display: flex;
+      align-items: center;
+      gap: 4px;
+      margin-bottom: 6px;
+    }
+    .row label {
+      width: 26px;
+    }
+    input[type="range"] {
+      flex: 1;
+    }
+    input[type="number"] {
+      width: 55px;
+      padding: 2px 4px;
+      font-size: 12px;
+    }
+    .toggle {
+      display: flex;
+      align-items: center;
+      gap: 6px;
+      cursor: pointer;
+      font-size: 13px;
+    }
+    .toggle input {
+      width: 40px;
+      height: 20px;
+    }
+    #selectedLineInfo {
+      margin-top: 4px;
+      font-size: 12px;
+      color: #444;
+    }
+  </style>
+</head>
+<body>
+<div id="container">
+  <div id="sidebar">
+    <div class="section">
+      <b>Tools</b><br>
+      <div class="tool-buttons">
+        <button id="toolCircle" class="active">Circle</button>
+        <button id="toolLine">Line</button>
+        <button id="toolDelete">Delete</button>
+      </div>
+      <div style="margin-top:4px;font-size:12px;">
+        <b>Pan:</b> Right-drag anywhere<br>
+        (Circle tool: left-drag on empty = create/drag circle)
+      </div>
+    </div>
+
+    <div class="section">
+      <b>Snap Settings</b><br><br>
+      <label class="toggle">
+        <input type="checkbox" id="gridSnapToggle" checked>
+        Snap to Grid
+      </label>
+      <div style="font-size:11px;margin-top:4px;">
+        Grid snap affects centres / line points.<br>
+        Circle/line intersections & tangencies always snap.
+      </div>
+    </div>
+
+    <div class="section">
+      <b>Circle Radii (grid units)</b>
+      <div class="row">
+        <label>r1</label>
+        <input type="range" id="r1Slider" min="0" max="100" value="2">
+        <input type="number" id="r1Input" min="0" max="100" value="2">
+      </div>
+      <div class="row">
+        <label>r2</label>
+        <input type="range" id="r2Slider" min="0" max="100" value="3">
+        <input type="number" id="r2Input" min="0" max="100" value="3">
+      </div>
+      <div class="row">
+        <label>r3</label>
+        <input type="range" id="r3Slider" min="0" max="100" value="4">
+        <input type="number" id="r3Input" min="0" max="100" value="4">
+      </div>
+      <div style="margin-top:6px;">
+        New circles use:
+        <label><input type="radio" name="radiusChoice" value="0" checked> r1</label>
+        <label><input type="radio" name="radiusChoice" value="1"> r2</label>
+        <label><input type="radio" name="radiusChoice" value="2"> r3</label>
+      </div>
+      <div style="font-size:11px;margin-top:4px;">
+        1 unit = 1 grid spacing.
+      </div>
+    </div>
+
+    <div class="section">
+      <b>Line Length (grid units)</b><br>
+      <div class="row">
+        <input type="number" id="lineLengthInput" step="0.1" min="0" style="flex:1;">
+        <button id="setLengthBtn" style="flex:0 0 auto;">Set</button>
+      </div>
+      <div id="selectedLineInfo">No line selected.</div>
+    </div>
+
+    <div class="section">
+      <button id="clearBtn">Clear All</button>
+    </div>
+  </div>
+
+  <canvas id="graphCanvas"></canvas>
+</div>
+
+<script>
+(function () {
+  const canvas = document.getElementById('graphCanvas');
+  const ctx = canvas.getContext('2d');
+  const sidebar = document.getElementById('sidebar');
+
+  const scale = 40;              // pixels per world/grid unit
+  let offsetX = 0;               // pixel x for world (0,0)
+  let offsetY = 0;               // pixel y for world (0,0)
+  let offsetInitialised = false;
+
+  const gridSnapToggle = document.getElementById('gridSnapToggle');
+  let gridSnapEnabled = gridSnapToggle.checked;
+
+  const snapThresholdPx = 10;
+
+  // World objects
+  const circles = []; // {x, y, radiusIndex}
+  const lines   = []; // {x1, y1, x2, y2}
+
+  // Radii in world units
+  let radii = [
+    parseFloat(document.getElementById('r1Input').value),
+    parseFloat(document.getElementById('r2Input').value),
+    parseFloat(document.getElementById('r3Input').value)
+  ];
+  let currentRadiusIndex = 0;
+
+  // Tool & interaction state
+  let currentTool = 'circle';
+  let isMouseDown = false;
+  let currentAction = null; // 'dragCircle','createLine','dragLinePoint','pan'
+  let activeCircleIndex = null;
+  let activeLineIndex = null;
+  let activeLinePoint = null; // 'start' | 'end'
+  let selectedLineIndex = null;
+  let panLastPx = 0;
+  let panLastPy = 0;
+
+  // ---------- Transform helpers ----------
+  function worldToScreen(wx, wy) {
+    return {
+      x: offsetX + wx * scale,
+      y: offsetY - wy * scale
+    };
+  }
+  function screenToWorld(px, py) {
+    return {
+      x: (px - offsetX) / scale,
+      y: (offsetY - py) / scale
+    };
+  }
+
+  // ---------- Resize ----------
+  function resizeCanvas() {
+    canvas.width  = window.innerWidth - sidebar.offsetWidth;
+    canvas.height = window.innerHeight;
+    if (!offsetInitialised) {
+      offsetX = canvas.width / 2;
+      offsetY = canvas.height / 2;
+      offsetInitialised = true;
+    }
+    draw();
+  }
+  window.addEventListener('resize', resizeCanvas);
+  resizeCanvas();
+
+  // ---------- Utility ----------
+  function clamp(v, min, max) {
+    return Math.max(min, Math.min(max, v));
+  }
+  function dist2D(ax, ay, bx, by) {
+    return Math.hypot(bx - ax, by - ay);
+  }
+
+  // ---------- Geometry helpers ----------
+  function segmentIntersectionWorld(a, b) {
+    const p = { x: a.x1, y: a.y1 };
+    const r = { x: a.x2 - a.x1, y: a.y2 - a.y1 };
+    const q = { x: b.x1, y: b.y1 };
+    const s = { x: b.x2 - b.x1, y: b.y2 - b.y1 };
+
+    const cross = (u, v) => u.x * v.y - u.y * v.x;
+
+    const rxs = cross(r, s);
+    if (Math.abs(rxs) < 1e-9) return null;
+
+    const q_p = { x: q.x - p.x, y: q.y - p.y };
+    const t = cross(q_p, s) / rxs;
+    const u = cross(q_p, r) / rxs;
+
+    if (t >= 0 && t <= 1 && u >= 0 && u <= 1) {
+      return { x: p.x + r.x * t, y: p.y + r.y * t };
+    }
+    return null;
+  }
+
+  function lineCircleIntersectionsWorld(line, c, r) {
+    const p1 = { x: line.x1, y: line.y1 };
+    const p2 = { x: line.x2, y: line.y2 };
+    const d  = { x: p2.x - p1.x, y: p2.y - p1.y };
+    const f  = { x: p1.x - c.x, y: p1.y - c.y };
+
+    const A = d.x * d.x + d.y * d.y;
+    const B = 2 * (f.x * d.x + f.y * d.y);
+    const C = f.x * f.x + f.y * f.y - r * r;
+
+    const disc = B * B - 4 * A * C;
+    if (disc < 0) return [];
+
+    const sqrtDisc = Math.sqrt(disc);
+    const t1 = (-B - sqrtDisc) / (2 * A);
+    const t2 = (-B + sqrtDisc) / (2 * A);
+
+    const pts = [];
+    if (t1 >= 0 && t1 <= 1) {
+      pts.push({ x: p1.x + d.x * t1, y: p1.y + d.y * t1 });
+    }
+    if (disc > 0 && t2 >= 0 && t2 <= 1) {
+      pts.push({ x: p1.x + d.x * t2, y: p1.y + d.y * t2 });
+    }
+    return pts;
+  }
+
+  function circleCircleIntersectionsWorld(c0, r0, c1, r1) {
+    const dx = c1.x - c0.x;
+    const dy = c1.y - c0.y;
+    const d  = Math.hypot(dx, dy);
+    if (d < 1e-9) return [];
+
+    if (d > r0 + r1 + 1e-9) return [];
+    if (d < Math.abs(r0 - r1) - 1e-9) return [];
+
+    const a  = (r0 * r0 - r1 * r1 + d * d) / (2 * d);
+    const h2 = r0 * r0 - a * a;
+    if (h2 < -1e-9) return [];
+
+    const xm = c0.x + (a * dx) / d;
+    const ym = c0.y + (a * dy) / d;
+
+    if (Math.abs(h2) < 1e-9) {
+      return [{ x: xm, y: ym }];
+    }
+
+    const h  = Math.sqrt(h2);
+    const rx = (-dy * h) / d;
+    const ry = ( dx * h) / d;
+
+    return [
+      { x: xm + rx, y: ym + ry },
+      { x: xm - rx, y: ym - ry }
+    ];
+  }
+
+  // ---------- Feature points for snapping ----------
+  function computeFeaturePointsWorld() {
+    const pts = [];
+
+    // Circle centres
+    for (const c of circles) {
+      pts.push({ x: c.x, y: c.y });
+    }
+
+    // Line-line intersections
+    for (let i = 0; i < lines.length; i++) {
+      for (let j = i + 1; j < lines.length; j++) {
+        const p = segmentIntersectionWorld(lines[i], lines[j]);
+        if (p) pts.push(p);
+      }
+    }
+
+    // Line-circle intersections
+    for (const line of lines) {
+      for (const c of circles) {
+        const r = radii[c.radiusIndex];
+        const ptsLC = lineCircleIntersectionsWorld(line, { x: c.x, y: c.y }, r);
+        for (const p of ptsLC) pts.push(p);
+      }
+    }
+
+    return pts;
+  }
+
+  // ---------- Nearest snap (for line endpoints etc.) ----------
+  function nearestSnapWorld(wx, wy, pointerPx, pointerPy) {
+    // Base: current world position
+    const baseScreen = worldToScreen(wx, wy);
+    let bestWorld   = { x: wx, y: wy };
+    let bestDistPx  = Infinity;
+
+    // Grid candidate (if enabled)
+    if (gridSnapEnabled) {
+      const gx = Math.round(wx);
+      const gy = Math.round(wy);
+      const sp = worldToScreen(gx, gy);
+      const d  = dist2D(sp.x, sp.y, pointerPx, pointerPy);
+      if (d <= snapThresholdPx && d < bestDistPx) {
+        bestWorld  = { x: gx, y: gy };
+        bestDistPx = d;
+      }
+    }
+
+    // Circle edge snapping (rotationally symmetric)
+    for (const c of circles) {
+      const r  = radii[c.radiusIndex];
+      const dx = wx - c.x;
+      const dy = wy - c.y;
+      const distToCenter = Math.hypot(dx, dy);
+
+      if (distToCenter > 1e-9) {
+        // Nearest point on boundary
+        const ex = c.x + (dx / distToCenter) * r;
+        const ey = c.y + (dy / distToCenter) * r;
+
+        // Distance from point to boundary in world units
+        const worldDelta  = Math.abs(distToCenter - r);
+        const pixelDelta  = worldDelta * scale;
+
+        if (pixelDelta <= snapThresholdPx && pixelDelta < bestDistPx) {
+          bestDistPx = pixelDelta;
+          bestWorld  = { x: ex, y: ey };
+        }
+      }
+    }
+
+    // Feature points (centres, line intersections, line-circle intersections)
+    const features = computeFeaturePointsWorld();
+    for (const p of features) {
+      const sp = worldToScreen(p.x, p.y);
+      const d  = dist2D(sp.x, sp.y, pointerPx, pointerPy);
+      if (d <= snapThresholdPx && d < bestDistPx) {
+        bestDistPx = d;
+        bestWorld  = { x: p.x, y: p.y };
+      }
+    }
+
+    return bestWorld;
+  }
+
+  // ---------- Circle edge-to-edge tangency snapping (single + dual) ----------
+  function circleTangencySnapWorld(circleIndex, baseWorld, pointerPx, pointerPy) {
+    const cA = circles[circleIndex];
+    const rA = radii[cA.radiusIndex];
+
+    let candidates = [];
+
+    // Single-circle tangency (outer + inner)
+    for (let i = 0; i < circles.length; i++) {
+      if (i === circleIndex) continue;
+      const cB = circles[i];
+      const rB = radii[cB.radiusIndex];
+
+      const dOuter = rA + rB;
+      const dInner = Math.abs(rA - rB);
+
+      const dx = baseWorld.x - cB.x;
+      const dy = baseWorld.y - cB.y;
+      let len = Math.hypot(dx, dy);
+      if (len < 1e-9) len = 1;
+
+      // outer
+      if (dOuter > 0) {
+        const wx = cB.x + (dx / len) * dOuter;
+        const wy = cB.y + (dy / len) * dOuter;
+        const sp = worldToScreen(wx, wy);
+        const dpx = dist2D(sp.x, sp.y, pointerPx, pointerPy);
+        if (dpx <= snapThresholdPx) {
+          candidates.push({ x: wx, y: wy, distPx: dpx, constraints: [i] });
+        }
+      }
+      // inner
+      if (dInner > 0) {
+        const wx = cB.x + (dx / len) * dInner;
+        const wy = cB.y + (dy / len) * dInner;
+        const sp = worldToScreen(wx, wy);
+        const dpx = dist2D(sp.x, sp.y, pointerPx, pointerPy);
+        if (dpx <= snapThresholdPx) {
+          candidates.push({ x: wx, y: wy, distPx: dpx, constraints: [i] });
+        }
+      }
+    }
+
+    // Dual-circle simultaneous tangency (A tangent to B and C)
+    for (let i = 0; i < circles.length; i++) {
+      if (i === circleIndex) continue;
+      for (let j = i + 1; j < circles.length; j++) {
+        if (j === circleIndex) continue;
+        const cB = circles[i];
+        const cC = circles[j];
+        const rB = radii[cB.radiusIndex];
+        const rC = radii[cC.radiusIndex];
+
+        const dB_outer = rA + rB;
+        const dB_inner = Math.abs(rA - rB);
+        const dC_outer = rA + rC;
+        const dC_inner = Math.abs(rA - rC);
+
+        const dBOptions = [dB_outer, dB_inner].filter(v => v > 0);
+        const dCOptions = [dC_outer, dC_inner].filter(v => v > 0);
+
+        for (const dB of dBOptions) {
+          for (const dC of dCOptions) {
+            const pts = circleCircleIntersectionsWorld(
+              { x: cB.x, y: cB.y }, dB,
+              { x: cC.x, y: cC.y }, dC
+            );
+            for (const p of pts) {
+              const sp = worldToScreen(p.x, p.y);
+              const dpx = dist2D(sp.x, sp.y, pointerPx, pointerPy);
+              if (dpx <= snapThresholdPx) {
+                candidates.push({ x: p.x, y: p.y, distPx: dpx, constraints: [i, j] });
+              }
+            }
+          }
+        }
+      }
+    }
+
+    if (candidates.length === 0) return baseWorld;
+
+    candidates.sort((a, b) => a.distPx - b.distPx);
+    return { x: candidates[0].x, y: candidates[0].y };
+  }
+
+  // ---------- Drawing ----------
+  function drawGrid() {
+    ctx.clearRect(0, 0, canvas.width, canvas.height);
+
+    const xMin = (0 - offsetX) / scale;
+    const xMax = (canvas.width - offsetX) / scale;
+    const yMax = (offsetY - 0) / scale;
+    const yMin = (offsetY - canvas.height) / scale;
+
+    ctx.strokeStyle = '#e0e0e0';
+    ctx.lineWidth = 1;
+
+    // Vertical lines
+    for (let gx = Math.ceil(xMin); gx <= Math.floor(xMax); gx++) {
+      const sx = worldToScreen(gx, 0).x;
+      ctx.beginPath();
+      ctx.moveTo(sx, 0);
+      ctx.lineTo(sx, canvas.height);
+      ctx.stroke();
+    }
+
+    // Horizontal lines
+    for (let gy = Math.ceil(yMin); gy <= Math.floor(yMax); gy++) {
+      const sy = worldToScreen(0, gy).y;
+      ctx.beginPath();
+      ctx.moveTo(0, sy);
+      ctx.lineTo(canvas.width, sy);
+      ctx.stroke();
+    }
+
+    // Axes
+    ctx.strokeStyle = '#000000';
+    ctx.lineWidth = 1.5;
+
+    // y-axis
+    if (0 >= xMin && 0 <= xMax) {
+      const sx = worldToScreen(0, 0).x;
+      ctx.beginPath();
+      ctx.moveTo(sx, 0);
+      ctx.lineTo(sx, canvas.height);
+      ctx.stroke();
+    }
+
+    // x-axis
+    if (0 >= yMin && 0 <= yMax) {
+      const sy = worldToScreen(0, 0).y;
+      ctx.beginPath();
+      ctx.moveTo(0, sy);
+      ctx.lineTo(canvas.width, sy);
+      ctx.stroke();
+    }
+
+    // Dots at grid intersections
+    ctx.fillStyle = '#d0d0d0';
+    const dotRadius = 1.2;
+    for (let gx = Math.ceil(xMin); gx <= Math.floor(xMax); gx++) {
+      for (let gy = Math.ceil(yMin); gy <= Math.floor(yMax); gy++) {
+        const sp = worldToScreen(gx, gy);
+        ctx.beginPath();
+        ctx.arc(sp.x, sp.y, dotRadius, 0, Math.PI * 2);
+        ctx.fill();
+      }
+    }
+  }
+
+  function drawCircles() {
+    ctx.strokeStyle = '#0077cc';
+    ctx.fillStyle = '#0077cc';
+    ctx.lineWidth = 1.5;
+
+    for (const c of circles) {
+      const rWorld = radii[c.radiusIndex];
+      const rPx = rWorld * scale;
+      const sp = worldToScreen(c.x, c.y);
+
+      ctx.beginPath();
+      ctx.arc(sp.x, sp.y, rPx, 0, Math.PI * 2);
+      ctx.stroke();
+
+      ctx.beginPath();
+      ctx.arc(sp.x, sp.y, 3, 0, Math.PI * 2);
+      ctx.fill();
+    }
+  }
+
+  function drawLines() {
+    ctx.lineWidth = 2;
+
+    for (let i = 0; i < lines.length; i++) {
+      const L  = lines[i];
+      const s1 = worldToScreen(L.x1, L.y1);
+      const s2 = worldToScreen(L.x2, L.y2);
+
+      ctx.strokeStyle = (i === selectedLineIndex) ? '#ff6600' : '#444444';
+      ctx.beginPath();
+      ctx.moveTo(s1.x, s1.y);
+      ctx.lineTo(s2.x, s2.y);
+      ctx.stroke();
+
+      ctx.fillStyle = ctx.strokeStyle;
+      ctx.beginPath();
+      ctx.arc(s1.x, s1.y, 3, 0, Math.PI * 2);
+      ctx.fill();
+      ctx.beginPath();
+      ctx.arc(s2.x, s2.y, 3, 0, Math.PI * 2);
+      ctx.fill();
+    }
+  }
+
+  function draw() {
+    drawGrid();
+    drawCircles();
+    drawLines();
+  }
+
+  // ---------- UI controls ----------
+  const toolCircleBtn = document.getElementById('toolCircle');
+  const toolLineBtn   = document.getElementById('toolLine');
+  const toolDeleteBtn = document.getElementById('toolDelete');
+
+    toolCircleBtn.addEventListener('click', () => {
+        currentTool = 'circle';
+        toolCircleBtn.classList.add('active');
+        toolLineBtn.classList.remove('active');
+        toolDeleteBtn.classList.remove('active');
+    });
+
+    toolLineBtn.addEventListener('click', () => {
+        currentTool = 'line';
+        toolLineBtn.classList.add('active');
+        toolCircleBtn.classList.remove('active');
+        toolDeleteBtn.classList.remove('active');
+    });
+
+    toolDeleteBtn.addEventListener('click', () => {
+        currentTool = 'delete';
+        toolDeleteBtn.classList.add('active');
+        toolCircleBtn.classList.remove('active');
+        toolLineBtn.classList.remove('active');
+    });
+
+
+    
+  gridSnapToggle.addEventListener('change', () => {
+    gridSnapEnabled = gridSnapToggle.checked;
+  });
+
+  function setupRadiusControl(idx, sliderId, inputId) {
+    const slider = document.getElementById(sliderId);
+    const input  = document.getElementById(inputId);
+    slider.addEventListener('input', () => {
+      radii[idx] = parseFloat(slider.value);
+      input.value = slider.value;
+      draw();
+    });
+    input.addEventListener('change', () => {
+      let v = parseFloat(input.value);
+      if (!isFinite(v)) v = radii[idx];
+      v = clamp(v, 0, 100);
+      radii[idx] = v;
+      slider.value = v;
+      draw();
+    });
+  }
+  setupRadiusControl(0, 'r1Slider', 'r1Input');
+  setupRadiusControl(1, 'r2Slider', 'r2Input');
+  setupRadiusControl(2, 'r3Slider', 'r3Input');
+
+  document.querySelectorAll("input[name='radiusChoice']").forEach(r => {
+    r.addEventListener('change', e => {
+      currentRadiusIndex = parseInt(e.target.value, 10);
+    });
+  });
+
+  const lineLengthInput  = document.getElementById('lineLengthInput');
+  const setLengthBtn     = document.getElementById('setLengthBtn');
+  const selectedLineInfo = document.getElementById('selectedLineInfo');
+  const clearBtn         = document.getElementById('clearBtn');
+
+  function updateSelectedLineInfo() {
+    if (selectedLineIndex == null || selectedLineIndex < 0 || selectedLineIndex >= lines.length) {
+      selectedLineInfo.textContent = 'No line selected.';
+      return;
+    }
+    const L = lines[selectedLineIndex];
+    const lenUnits = dist2D(L.x1, L.y1, L.x2, L.y2);
+    selectedLineInfo.textContent = `Selected line length: ${lenUnits.toFixed(2)} units`;
+    lineLengthInput.value = lenUnits.toFixed(2);
+  }
+
+  setLengthBtn.addEventListener('click', () => {
+    if (selectedLineIndex == null || selectedLineIndex < 0 || selectedLineIndex >= lines.length) return;
+    const L = lines[selectedLineIndex];
+    const desired = parseFloat(lineLengthInput.value);
+    if (!isFinite(desired) || desired <= 0) return;
+
+    const dx = L.x2 - L.x1;
+    const dy = L.y2 - L.y1;
+    const curLen = Math.hypot(dx, dy);
+    if (curLen < 1e-9) return;
+
+    const s = desired / curLen;
+    L.x2 = L.x1 + dx * s;
+    L.y2 = L.y1 + dy * s;
+
+    updateSelectedLineInfo();
+    draw();
+  });
+
+  clearBtn.addEventListener('click', () => {
+    circles.length = 0;
+    lines.length = 0;
+    selectedLineIndex = null;
+    updateSelectedLineInfo();
+    draw();
+  });
+
+  // ---------- Hit testing ----------
+  function getMousePos(evt) {
+    const rect = canvas.getBoundingClientRect();
+    return { px: evt.clientX - rect.left, py: evt.clientY - rect.top };
+  }
+
+  function findCircleAtPixel(px, py) {
+    for (let i = circles.length - 1; i >= 0; i--) {
+      const c = circles[i];
+      const rWorld = radii[c.radiusIndex];
+      const rPx    = rWorld * scale;
+      const sp     = worldToScreen(c.x, c.y);
+      const dpx    = dist2D(px, py, sp.x, sp.y);
+      if (dpx <= rPx + 6) return i;
+    }
+    return null;
+  }
+
+  function findLineEndpointAtPixel(px, py) {
+    const threshold = 8;
+    for (let i = lines.length - 1; i >= 0; i--) {
+      const L  = lines[i];
+      const s1 = worldToScreen(L.x1, L.y1);
+      const s2 = worldToScreen(L.x2, L.y2);
+      if (dist2D(px, py, s1.x, s1.y) <= threshold) return { index: i, point: 'start' };
+      if (dist2D(px, py, s2.x, s2.y) <= threshold) return { index: i, point: 'end' };
+    }
+    return null;
+  }
+
+  function pointToSegmentDistancePx(px, py, sx1, sy1, sx2, sy2) {
+    const dx = sx2 - sx1;
+    const dy = sy2 - sy1;
+    if (dx === 0 && dy === 0) return dist2D(px, py, sx1, sy1);
+    const t = clamp(((px - sx1) * dx + (py - sy1) * dy) / (dx * dx + dy * dy), 0, 1);
+    const ix = sx1 + t * dx;
+    const iy = sy1 + t * dy;
+    return dist2D(px, py, ix, iy);
+  }
+
+  function findLineNearPixel(px, py) {
+    const threshold = 6;
+    for (let i = lines.length - 1; i >= 0; i--) {
+      const L  = lines[i];
+      const s1 = worldToScreen(L.x1, L.y1);
+      const s2 = worldToScreen(L.x2, L.y2);
+      const d  = pointToSegmentDistancePx(px, py, s1.x, s1.y, s2.x, s2.y);
+      if (d <= threshold) return i;
+    }
+    return null;
+  }
+
+  // ---------- Mouse interaction ----------
+  canvas.addEventListener('contextmenu', e => e.preventDefault());
+
+  canvas.addEventListener('mousedown', (evt) => {
+    const { px, py } = getMousePos(evt);
+    isMouseDown = true;
+
+    // Right button => pan
+    if (evt.button === 2) {
+      currentAction = 'pan';
+      panLastPx = px;
+      panLastPy = py;
+      return;
+    }
+    if (evt.button !== 0) return; // only left below
+
+    if (currentTool === 'delete') {
+
+        // Try circles first (they have priority in hit-testing)
+        const idxCircle = findCircleAtPixel(px, py);
+        if (idxCircle != null) {
+            circles.splice(idxCircle, 1);
+            draw();
+            return;
+        }
+
+        // Try line endpoints next
+        const ep = findLineEndpointAtPixel(px, py);
+        if (ep) {
+            lines.splice(ep.index, 1);
+            if (selectedLineIndex === ep.index) selectedLineIndex = null;
+            draw();
+            return;
+        }
+
+        // Try line bodies
+        const li = findLineNearPixel(px, py);
+        if (li != null) {
+            lines.splice(li, 1);
+            if (selectedLineIndex === li) selectedLineIndex = null;
+            draw();
+            return;
+        }
+
+        // Nothing hit → do nothing
+        return;
+    }
+
+    if (currentTool === 'circle') {
+      const idx = findCircleAtPixel(px, py);
+      if (idx != null) {
+        // drag existing circle
+        activeCircleIndex = idx;
+        currentAction = 'dragCircle';
+      } else {
+        // create new circle at snapped position, then drag
+        const wMouse = screenToWorld(px, py);
+        const base = gridSnapEnabled
+          ? { x: Math.round(wMouse.x), y: Math.round(wMouse.y) }
+          : wMouse;
+        circles.push({
+          x: base.x,
+          y: base.y,
+          radiusIndex: currentRadiusIndex
+        });
+        activeCircleIndex = circles.length - 1;
+        currentAction = 'dragCircle';
+      }
+    } else if (currentTool === 'line') {
+      const ep = findLineEndpointAtPixel(px, py);
+      if (ep) {
+        activeLineIndex = ep.index;
+        activeLinePoint = ep.point;
+        currentAction   = 'dragLinePoint';
+        selectedLineIndex = ep.index;
+        updateSelectedLineInfo();
+        draw();
+        return;
+      }
+
+      const li = findLineNearPixel(px, py);
+      if (li != null) {
+        selectedLineIndex = li;
+        updateSelectedLineInfo();
+        draw();
+        return;
+      }
+
+      // create new line
+      const wMouse    = screenToWorld(px, py);
+      const snapWorld = nearestSnapWorld(wMouse.x, wMouse.y, px, py);
+      lines.push({
+        x1: snapWorld.x,
+        y1: snapWorld.y,
+        x2: snapWorld.x,
+        y2: snapWorld.y
+      });
+      activeLineIndex   = lines.length - 1;
+      selectedLineIndex = activeLineIndex;
+      updateSelectedLineInfo();
+      currentAction = 'createLine';
+      draw();
+    }
+  });
+
+  canvas.addEventListener('mousemove', (evt) => {
+    if (!isMouseDown) return;
+    const { px, py } = getMousePos(evt);
+
+    if (currentAction === 'pan') {
+      const dx = px - panLastPx;
+      const dy = py - panLastPy;
+      offsetX += dx;
+      offsetY += dy;
+      panLastPx = px;
+      panLastPy = py;
+      draw();
+      return;
+    }
+
+    if (currentAction === 'dragCircle' && activeCircleIndex != null) {
+      const wMouse = screenToWorld(px, py);
+      const base = gridSnapEnabled
+        ? { x: Math.round(wMouse.x), y: Math.round(wMouse.y) }
+        : wMouse;
+      const snapped = circleTangencySnapWorld(activeCircleIndex, base, px, py);
+      circles[activeCircleIndex].x = snapped.x;
+      circles[activeCircleIndex].y = snapped.y;
+      draw();
+    }
+
+    if ((currentAction === 'createLine' || currentAction === 'dragLinePoint') && activeLineIndex != null) {
+      const wMouse    = screenToWorld(px, py);
+      const snapWorld = nearestSnapWorld(wMouse.x, wMouse.y, px, py);
+      const L = lines[activeLineIndex];
+      if (currentAction === 'createLine') {
+        L.x2 = snapWorld.x;
+        L.y2 = snapWorld.y;
+      } else if (currentAction === 'dragLinePoint') {
+        if (activeLinePoint === 'start') {
+          L.x1 = snapWorld.x;
+          L.y1 = snapWorld.y;
+        } else {
+          L.x2 = snapWorld.x;
+          L.y2 = snapWorld.y;
+        }
+      }
+      updateSelectedLineInfo();
+      draw();
+    }
+  });
+
+  canvas.addEventListener('mouseup', () => {
+    isMouseDown = false;
+    currentAction = null;
+    activeCircleIndex = null;
+    activeLineIndex = null;
+    activeLinePoint = null;
+  });
+
+  canvas.addEventListener('mouseleave', () => {
+    isMouseDown = false;
+    currentAction = null;
+    activeCircleIndex = null;
+    activeLineIndex = null;
+    activeLinePoint = null;
+  });
+
+  // Initial draw
+  draw();
+})();
+</script>
+</body>
+</html>
+
